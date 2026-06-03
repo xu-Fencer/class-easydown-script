@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         class-easydown - 西安交大课程回放批量下载
 // @namespace    https://github.com/xu-fencer/class-easydown-script
-// @version      1.0.0
+// @version      1.0.1
 // @description  在录播教材页面批量下载课程回放视频（区分老师路/电脑路）
 // @author       xu-fencer
 // @match        https://class.xjtu.edu.cn/course/*/lesson*
@@ -11,6 +11,11 @@
 // @connect      class.xjtu.edu.cn
 // @connect      class-rms.xjtu.edu.cn
 // @connect      review-class.xjtu.edu.cn
+// @changelog
+// ==v1.0.1==
+// - [优化] "下载选中"功能改为"提取链接"：点击后弹出窗口，自动复制所有选中视频的最终链接到剪贴板，支持一键复制
+// ==v1.0.0==
+// - 初始版本，支持老师路/电脑路两路视频获取、行内快捷按钮、一键获取全部链接
 // ==/UserScript==
 
 (function() {
@@ -212,6 +217,41 @@
         }
         .easydown-batch-btn:hover { background: #e6f7ff; }
         .easydown-batch-btn.easydown-loading { opacity: 0.55; cursor: wait; }
+        .easydown-modal-overlay {
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.5); z-index: 9999999;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .easydown-modal {
+            background: #fff; border-radius: 8px; width: 640px; max-width: 90vw;
+            max-height: 80vh; display: flex; flex-direction: column;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.2); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+        .easydown-modal-header {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 12px 16px; border-bottom: 1px solid #f0f0f0;
+            background: #1890ff; color: #fff; border-radius: 8px 8px 0 0;
+        }
+        .easydown-modal-header .easydown-modal-title { font-size: 15px; font-weight: 600; }
+        .easydown-modal-close { background: none; border: none; color: #fff; font-size: 18px; cursor: pointer; padding: 0; line-height: 1; }
+        .easydown-modal-close:hover { opacity: 0.8; }
+        .easydown-modal-body { padding: 16px; overflow-y: auto; }
+        .easydown-modal-track {
+            display: inline-block; padding: 2px 10px; border-radius: 12px;
+            font-size: 12px; font-weight: 500; margin-bottom: 10px;
+        }
+        .easydown-modal-track-INSTRUCTOR { background: #e6f7ff; color: #1890ff; }
+        .easydown-modal-track-ENCODER { background: #fff7e6; color: #fa8c16; }
+        .easydown-modal-textarea {
+            width: 100%; height: 300px; resize: none; border: 1px solid #d9d9d9;
+            border-radius: 4px; padding: 10px; font-size: 12px; font-family: Consolas, monospace;
+            color: #333; box-sizing: border-box; line-height: 1.6;
+        }
+        .easydown-modal-textarea:focus { outline: none; border-color: #1890ff; }
+        .easydown-modal-copy-hint {
+            margin-top: 8px; font-size: 12px; color: #52c41a; display: none;
+        }
+        .easydown-modal-copy-hint.show { display: block; }
     `);
 
     // ==================== DOM 工具 ====================
@@ -339,10 +379,10 @@
 
     function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-    async function startDownload() {
+    async function extractSelectedLinks() {
         if (state.downloading) return;
-        if (state.selected.size === 0) { alert('请先选择要下载的录播视频'); return; }
-        if (!state.track) { alert('请选择下载老师路还是电脑路'); return; }
+        if (state.selected.size === 0) { alert('请先选择要提取链接的录播视频'); return; }
+        if (!state.track) { alert('请选择提取老师路还是电脑路'); return; }
 
         state.downloading = true;
         state.completed = 0;
@@ -355,16 +395,14 @@
         progressEl.classList.add('active');
         progressText.textContent = '正在解析视频链接...';
 
-        // 依次获取每个选中 lesson 的 video_suite
         const selectedIds = [...state.selected];
-        let queue = [];
+        const urls = [];
 
         for (let i = 0; i < selectedIds.length; i++) {
             const lessonId = selectedIds[i];
             const lesson = state.lessons.find(l => l.id === lessonId);
             if (!lesson) continue;
 
-            // 获取 video_suite
             let videoSuite = lesson._videoSuite;
             if (!videoSuite) {
                 try {
@@ -372,27 +410,24 @@
                     lesson._videoSuite = videoSuite;
                 } catch (e) {
                     state.failed++;
-                    updateUI();
+                    updateProgress();
                     continue;
                 }
             }
 
             if (!videoSuite || !videoSuite.videos) {
                 state.failed++;
-                updateUI();
+                updateProgress();
                 continue;
             }
 
             const video = videoSuite.videos.find(v => v.camera_type === state.track);
             if (!video || !video.file_url) {
                 state.failed++;
-                updateUI();
+                updateProgress();
                 continue;
             }
 
-            const filename = buildFilename(lesson, state.track);
-
-            // 获取 player-url 作为 Referer
             let referer = '';
             try {
                 referer = await loadPlayerUrl(lessonId);
@@ -400,65 +435,38 @@
                 console.error('[easydown] 获取 player-url 失败:', lesson.title, e);
             }
 
-            queue.push({ filename, url: video.file_url, lessonId, referer });
-        }
-
-        if (queue.length === 0) {
-            progressEl.classList.remove('active');
-            state.downloading = false;
-            updateUI();
-            alert('没有可下载的视频（可能暂无回放数据）');
-            return;
-        }
-
-        state.downloadQueue = queue;
-        updateProgress();
-
-        // 逐个下载
-        for (let i = 0; i < queue.length; i++) {
-            const item = queue[i];
-            progressText.textContent = `下载 (${i + 1}/${queue.length}): ${item.filename}`;
+            progressText.textContent = `解析 (${i + 1}/${selectedIds.length}): ${lesson.title}`;
             updateProgress();
 
             try {
-                console.log('[easydown] resolve URL:', item.url);
-                console.log('[easydown] Referer:', item.referer);
-                // 用 GM_xmlhttpRequest 获取重定向后的最终 URL
-                await new Promise((resolve, reject) => {
+                const finalUrl = await new Promise((resolve, reject) => {
                     GM_xmlhttpRequest({
                         method: 'HEAD',
-                        url: item.url,
-                        headers: { 'Referer': item.referer },
+                        url: video.file_url,
+                        headers: { 'Referer': referer },
                         redirect: 'follow',
-                        onload: (resp) => {
-                            console.log('[easydown] finalUrl:', resp.finalUrl);
-                            console.log('[easydown] status:', resp.status);
-                            state.completed++;
-                            resolve();
-                        },
-                        onerror: (e) => {
-                            console.error('[easydown] 请求失败:', item.filename, e);
-                            state.failed++;
-                            reject(e);
-                        },
-                        ontimeout: () => {
-                            console.error('[easydown] 请求超时:', item.filename);
-                            state.failed++;
-                            reject(new Error('timeout'));
-                        },
+                        onload: (resp) => resolve(resp.finalUrl),
+                        onerror: () => reject(new Error('解析失败')),
+                        ontimeout: () => reject(new Error('解析超时')),
                     });
                 });
+                urls.push(finalUrl);
+                state.completed++;
             } catch (e) {
                 state.failed++;
             }
             updateProgress();
         }
 
-        progressText.textContent = `完成! 成功 ${state.completed} / 失败 ${state.failed}`;
         state.downloading = false;
+        progressEl.classList.remove('active');
         updateUI();
-        updateProgress();
-        setTimeout(() => { progressEl.classList.remove('active'); updateUI(); }, 6000);
+
+        if (urls.length > 0) {
+            showLinksModal(urls, state.track);
+        } else {
+            alert('没有可提取链接的视频（可能暂无回放数据）');
+        }
     }
 
     function updateProgress() {
@@ -467,6 +475,42 @@
         const pct = total > 0 ? Math.round((done / total) * 100) : 0;
         const fill = $('#easydown-progress-fill');
         if (fill) fill.style.width = pct + '%';
+    }
+
+    function showLinksModal(urls, track) {
+        const overlay = el('div', { className: 'easydown-modal-overlay' });
+        const trackClass = track === 'INSTRUCTOR' ? 'easydown-modal-track-INSTRUCTOR' : 'easydown-modal-track-ENCODER';
+        const trackLabel = track === 'INSTRUCTOR' ? '👨‍🏫 老师路' : '🖥️ 电脑路';
+
+        const modal = el('div', { className: 'easydown-modal' });
+        const header = el('div', { className: 'easydown-modal-header' });
+        header.append(
+            el('span', { className: 'easydown-modal-title' }, '📥 批量提取链接结果'),
+            el('button', { className: 'easydown-modal-close', onClick: () => overlay.remove() }, '✕'),
+        );
+
+        const body = el('div', { className: 'easydown-modal-body' });
+        const textarea = el('textarea', {
+            className: 'easydown-modal-textarea',
+            readonly: 'readonly',
+            rows: Math.min(urls.length, 20),
+        }, urls.join('\n'));
+        const hint = el('div', { className: 'easydown-modal-copy-hint' }, '✅ 链接已自动复制到剪贴板');
+
+        body.append(
+            el('span', { className: `easydown-modal-track ${trackClass}` }, trackLabel),
+            el('div', { style: 'margin-bottom:8px;font-size:13px;color:#666;' }, `共 ${urls.length} 个链接，一行一个，点击下方文本框全选复制`),
+            textarea,
+            hint,
+        );
+
+        modal.append(header, body);
+        overlay.append(modal);
+        document.body.appendChild(overlay);
+
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+
+        navigator.clipboard.writeText(urls.join('\n')).then(() => hint.classList.add('show'));
     }
 
     // ==================== 行内按钮注入 ====================
@@ -664,14 +708,14 @@
         });
         toolbar.append(trackGroup);
 
-        // 下载按钮
+               // 下载按钮
         toolbar.append(
             el('button', {
                 className: 'easydown-btn easydown-btn-primary easydown-btn-sm',
                 id: 'easydown-download-btn',
                 disabled: 'true',
-                onClick: startDownload,
-            }, '⬇ 下载选中'),
+                onClick: extractSelectedLinks,
+            }, '⬇ 提取链接'),
             el('button', {
                 className: 'easydown-btn easydown-btn-sm',
                 onClick: refreshData,
@@ -753,9 +797,9 @@
         const btn = $('#easydown-download-btn');
         if (!btn) return;
         btn.disabled = state.selected.size === 0 || !state.track || state.downloading;
-        if (state.downloading) btn.textContent = '⏳ 下载中...';
-        else if (state.selected.size > 0 && state.track) btn.textContent = `⬇ 下载选中 (${state.selected.size}个)`;
-        else btn.textContent = '⬇ 下载选中';
+        if (state.downloading) btn.textContent = '⏳ 提取中...';
+        else if (state.selected.size > 0 && state.track) btn.textContent = `⬇ 提取链接 (${state.selected.size}个)`;
+        else btn.textContent = '⬇ 提取链接';
     }
 
     function updateUI() {
